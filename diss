@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+# stop on errors
+set -eu
+
+# Ensure non-localized printout
+export LC_NUMERIC=en_US.UTF-8
+
+pattern='Total MP2 Energy:'
+datafile=plotmp2_h2.dat
+
+# scan distances
+start_distance=1.0
+last_distance=5.0
+step=0.1
+
+input=$(cat << 'EOF'
+3 2 5
+   0.0  0.0  0.0   1.0  2
+   1.1
+   0.7
+   0.0  0.0  DIST  1.0  2
+   1.1
+   0.7
+   0.0  0.0  HALF  0.0  1
+   0.7
+EOF
+)
+
+tmpinp=temporary.inp
+tmpout=temporary.out
+
+# cleanup
+[ -f $datafile ] && rm -v $datafile || true
+
+steps=$(seq $start_distance $step $last_distance | wc -l)
+printf "Scanning from %.3f Bohr to %.3f Bohr in %d steps\n" \
+   $start_distance $last_distance $steps
+
+for distance in $(seq $start_distance $step $last_distance | sed s/,/./)
+do
+   echo "$input" | awk -v d="$distance" '{gsub("DIST", d); gsub("HALF", d/2); print}' > $tmpinp
+   
+   # perform the actual calculation 
+   cargo run -- $tmpinp 6 mp2 no > $tmpout 2>&1
+   
+   energy=$(grep "$pattern" $tmpout | awk '{printf "%s",$(NF)}' | tail -1)
+   
+   if [ -z "$energy" ]
+      then
+         1>&2 printf "ERROR!\n"
+         exit 1
+   fi
+   
+   printf "Current energy is %.10f Hartree for distance %.3f Bohr\n" $energy $distance
+   printf "%8.3f %14.10f\n" $distance $energy >> $datafile
+done
+
+# cleanup am Ende
+[ -f $tmpinp ] && rm $tmpinp
+[ -f $tmpout ] && rm $tmpout
+
+echo "Done! Ready for plotting."

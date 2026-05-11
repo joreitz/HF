@@ -1,0 +1,122 @@
+    println!("\n########### SCF ###########");
+    println!("Iter | Energy (Hartree) | ΔE");
+    
+    let mut converged = false;
+    let mut iter = 0;
+    let max_iter = 100;
+    
+    let packed_len = n_basis * (n_basis + 1) / 2;
+    let mut fock_packed = vec![0.0; packed_len];
+    
+    while !converged && iter < max_iter {
+        iter += 1;
+        
+        for i in 0..n_basis {
+            for j in 0..=i { 
+                let ij = get_integral_index(i, j);
+                fock_packed[ij] = h_core[ij];
+                
+                for k in 0..n_basis {
+                    for l in 0..n_basis {
+                        let kl = get_integral_index(k, l);
+                        let ijkl = get_integral_index(ij, kl);
+                        let ik = get_integral_index(i, k);
+                        let jl = get_integral_index(j, l);
+                        let ikjl = get_integral_index(ik, jl);
+                        
+                        fock_packed[ij] += p_matrix[l * n_basis + k] * (packed_2e_integrals[ijkl] - 0.5 * packed_2e_integrals[ikjl]);
+                    }
+                }
+            }
+        }
+        
+        let fock_full = unpack_symmetric_matrix(&fock_packed, n_basis);
+        
+        let e_rhf = get_rhf_energy(&h_core_full, &fock_full, &p_matrix, n_basis, enuc);
+
+        let delta_e = (e_rhf - e_rhf_init).abs();
+        println!("{:>4} | {:>16.8} | {:.2e}", iter, e_rhf, delta_e);
+        
+        if delta_e < 1e-8 && iter > 1 {
+            converged = true;
+            e_rhf_init = e_rhf;
+            break;
+        }
+        e_rhf_init = e_rhf;
+
+        let mut f_prime = vec![0.0; n_basis * n_basis];
+        let mut temp = vec![0.0; n_basis * n_basis];
+        
+        // F' = X^T F X
+        for i in 0..n_basis {
+            for j in 0..n_basis {
+                for k in 0..n_basis {
+                    temp[j * n_basis + i] += x_full[k * n_basis + i] * fock_full[j * n_basis + k];
+                }
+            }
+        } 
+        for i in 0..n_basis {
+            for j in 0..n_basis {
+                for k in 0..n_basis {
+                    f_prime[j * n_basis + i] += temp[k * n_basis + i] * x_full[j * n_basis + k];
+                }
+            }
+        }
+
+        let mut f_prime_packed = sym_matrix_packing(&f_prime, n_basis);
+
+        let jobz = b'V'; 
+        let uplo = b'U'; 
+        let n = n_basis as i32;
+        let mut c_prime = vec![0.0; n_basis * n_basis]; 
+        let mut work = vec![0.0; 3 * n_basis]; 
+        let mut info = 0; 
+
+        unsafe {
+            dspev(
+                jobz, uplo, n,
+                &mut f_prime_packed,
+                &mut eigval, 
+                &mut c_prime,
+                n,
+                &mut work,
+                &mut info,
+            );
+        }
+        if info != 0 {
+            eprintln!("Error diagonalizing F': LAPACK info = {}", info);
+            process::exit(1);
+        }
+
+
+        c_matrix.fill(0.0);
+        for i in 0..n_basis {
+            for j in 0..n_basis {
+                for k in 0..n_basis {
+                    c_matrix[j * n_basis + i] += x_full[k * n_basis + i] * c_prime[j * n_basis + k];
+                }
+            }
+        }
+        
+
+        p_matrix.fill(0.0);
+        for i in 0..n_basis {
+            for j in 0..n_basis {
+                for k in 0..n_basis {
+                    p_matrix[j * n_basis + i] += occupation[k] * c_matrix[k * n_basis + i] * c_matrix[k * n_basis + j];
+                }
+            }
+        }
+    }
+
+    if converged {
+        println!("\nSCF procedure converged successfully in {} iterations!", iter);
+    } else {
+        println!("\nWARNING: SCF did NOT converge after {} iterations!", max_iter);
+    }
+    
+    println!("Final RHF Energy: {:.8}", e_rhf_init);
+    println!("Final Orbital Energies (Eigenvalues):");
+    for (i, energy) in eigval.iter().enumerate() {
+        println!("  Orbital {:>2}: {:>12.8} E_h", i + 1, energy);
+    }
